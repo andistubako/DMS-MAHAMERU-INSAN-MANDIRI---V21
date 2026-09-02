@@ -1,0 +1,7 @@
+Saya telah membuatkan fitur CRUD manual untuk Master Alamat (Wilayah). Fitur ini kini dapat diakses melalui menu navigasi samping dengan nama "Master Alamat".
+
+Pembaruan yang dilakukan:
+1. Menambahkan halaman Master Alamat dengan 4 tab: Provinsi, Kabupaten/Kota, Kecamatan, dan Kelurahan/Desa.
+2. Mengimplementasikan fitur pencarian berdasarkan nama dan kode area.
+3. Menyediakan antarmuka modal untuk menambah (Create), mengedit (Update), dan menghapus (Delete) data di masing-masing tingkatan wilayah, dengan pemetaan hierarki (pilihan induk provinsi/kabupaten/kecamatan) yang terintegrasi langsung dengan database.
+4. Menambahkan rute baru untuk mengakses halaman ini tanpa memengaruhi sistem *import* massal yang sudah ada.
