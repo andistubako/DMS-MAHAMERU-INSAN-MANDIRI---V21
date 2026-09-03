@@ -155,7 +155,12 @@ const ENTITIES = {
     icon: Package,
     endpoint: "/masters/products",
     description: "Daftar merek dan lini kategori produk",
-    columns: [{ k: "name", l: "Nama Produk" }, { k: "brand", l: "Brand" }, { k: "category", l: "Kategori" }, { k: "status", l: "Status", badge: true }],
+    columns: [{ k: "name", l: "Informasi Produk", render: (item) => (
+      <div className="flex flex-col">
+        <span className="font-semibold text-slate-800">{item.name || "-"}</span>
+        <span className="text-slate-500 text-[10px]">KODE: {item.product_code || "-"}</span>
+      </div>
+    ) }, { k: "brand", l: "Brand" }, { k: "category", l: "Kategori" }, { k: "status", l: "Status", badge: true }],
     fields: [
       { k: "name", l: "Nama Lini Produk *", required: true, placeholder: "Contoh: Mahameru Sejati Filter", colSpan: 2 },
       { k: "brand", l: "Brand / Merek Dagang", placeholder: "Contoh: Mahameru" },
@@ -168,7 +173,12 @@ const ENTITIES = {
     icon: Barcode,
     endpoint: "/masters/skus",
     description: "Item unit terkecil persediaan dan kode barcode produk",
-    columns: [{ k: "sku_code", l: "Kode SKU" }, { k: "name", l: "Nama SKU" }, { k: "unit", l: "Satuan" }, { k: "base_price", l: "Harga Dasar", money: true }, { k: "status", l: "Status", badge: true }],
+    columns: [{ k: "name", l: "Informasi SKU", render: (item) => (
+      <div className="flex flex-col">
+        <span className="font-semibold text-slate-800">{item.name || "-"}</span>
+        <span className="text-slate-500 text-[10px]">SKU: {item.sku_code || "-"}</span>
+      </div>
+    ) }, { k: "unit", l: "Satuan" }, { k: "base_price", l: "Harga Dasar", money: true }, { k: "status", l: "Status", badge: true }],
     fields: [
       { k: "product_id", l: "Produk Induk *", type: "select", source: "products", required: true, colSpan: 2 },
       { k: "sku_code", l: "Kode SKU / Barcode *", required: true, placeholder: "SKU-001 / 899123456789" },
@@ -521,6 +531,7 @@ function MasterTab({ entityKey, config, active }) {
   }, [options]);
 
   const displayVal = (col, item) => {
+    if (col.render) return col.render(item);
     if (col.badge) return <StatusBadge status={item[col.k]} />;
     if (col.money) return `Rp ${(item[col.k] || 0).toLocaleString("id-ID")}`;
     if (col.k.endsWith("_id")) return item[col.k] || "-";

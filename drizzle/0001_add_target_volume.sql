@@ -1,2 +1,0 @@
-ALTER TABLE targets
-  ADD COLUMN IF NOT EXISTS target_volume integer NOT NULL DEFAULT 0;

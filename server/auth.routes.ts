@@ -1,6 +1,5 @@
 import { Router, Response } from "express";
 import bcrypt from "bcryptjs";
-import { db } from "./data.js";
 import {
   AuthenticatedRequest,
   generateTokens,
@@ -11,6 +10,10 @@ import {
   revokeSession,
   revokeRefreshSession,
 } from "./auth.js";
+import { sqlDb } from "../src/db/index.js";
+import * as schema from "../src/db/schema.js";
+import { eq } from "drizzle-orm";
+import { User } from "./data.js";
 
 const router = Router();
 
@@ -22,7 +25,7 @@ const getAccessToken = (req: any): string | undefined => {
   return header?.startsWith("Bearer ") ? header.slice(7).trim() : undefined;
 };
 
-router.post("/login", (req, res) => {
+router.post("/login", async (req, res) => {
   try {
     const email = String(req.body?.email || "").trim().toLowerCase();
     const password = String(req.body?.password || "");
@@ -31,16 +34,19 @@ router.post("/login", (req, res) => {
       return res.status(400).json({ detail: "Email dan password wajib diisi." });
     }
 
-    const user = db.users.find((u) => String(u.email || "").toLowerCase() === email);
-    if (!user) return res.status(401).json({ detail: "Email atau password salah." });
-    if (user.status !== "ACTIVE") {
+    const dbUser = await sqlDb.query.users.findFirst({
+      where: eq(schema.users.email, email),
+    });
+
+    if (!dbUser) return res.status(401).json({ detail: "Email atau password salah." });
+    if (dbUser.status !== "ACTIVE") {
       return res.status(403).json({ detail: "Akun Anda dinonaktifkan. Hubungi admin." });
     }
 
     let valid = false;
-    if (user.password_hash) {
+    if (dbUser.passwordHash) {
       try {
-        valid = bcrypt.compareSync(password, user.password_hash);
+        valid = bcrypt.compareSync(password, dbUser.passwordHash);
       } catch {
         valid = false;
       }
@@ -55,16 +61,35 @@ router.post("/login", (req, res) => {
         "admin@mahameru.id": ["admin123", "password"],
         "andismochsolihin@gmail.com": ["owner123", "password"],
       };
-      const allowed = demoMap[user.email.toLowerCase()];
+
+      const allowed = demoMap[dbUser.email.toLowerCase()];
       if (allowed && allowed.includes(password)) {
         valid = true;
-        user.password_hash = bcrypt.hashSync(password, 10);
+        const newHash = bcrypt.hashSync(password, 10);
+        dbUser.passwordHash = newHash;
+        await sqlDb.update(schema.users)
+          .set({ passwordHash: newHash })
+          .where(eq(schema.users.id, dbUser.id));
       }
     }
 
     if (!valid) return res.status(401).json({ detail: "Email atau password salah." });
 
-    const { token, refreshToken } = generateTokens(user);
+    const mappedUser: User = {
+      _id: dbUser.id,
+      id: dbUser.id,
+      name: dbUser.name,
+      email: dbUser.email,
+      password_hash: dbUser.passwordHash || "",
+      role: dbUser.role as any,
+      phone: dbUser.phone || "",
+      status: dbUser.status as any,
+      office_id: dbUser.officeId || undefined,
+      area_id: dbUser.areaId || undefined,
+      created_at: dbUser.createdAt ? dbUser.createdAt.toISOString() : new Date().toISOString(),
+    };
+
+    const { token, refreshToken } = generateTokens(mappedUser);
     setAuthCookies(res, token, refreshToken);
 
     return res.json({
@@ -72,14 +97,14 @@ router.post("/login", (req, res) => {
       token,
       refreshToken,
       user: {
-        _id: user._id,
-        id: user._id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
-        status: user.status,
-        office_id: user.office_id,
-        area_id: user.area_id,
+        _id: mappedUser._id,
+        id: mappedUser._id,
+        email: mappedUser.email,
+        name: mappedUser.name,
+        role: mappedUser.role,
+        status: mappedUser.status,
+        office_id: mappedUser.office_id,
+        area_id: mappedUser.area_id,
       },
     });
   } catch (error: any) {
@@ -87,9 +112,10 @@ router.post("/login", (req, res) => {
   }
 });
 
-router.post("/refresh", (req, res) => {
+router.post("/refresh", async (req, res) => {
   const oldRefreshToken = getRefreshToken(req);
-  const rotated = rotateRefreshToken(oldRefreshToken);
+  const rotated = await rotateRefreshToken(oldRefreshToken);
+
   if (!rotated) {
     clearAuthCookies(res);
     return res.status(401).json({ detail: "Refresh session tidak valid atau telah kedaluwarsa." });

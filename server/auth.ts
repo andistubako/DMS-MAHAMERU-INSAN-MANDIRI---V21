@@ -1,6 +1,9 @@
 import { Request, Response, NextFunction } from "express";
 import crypto from "crypto";
-import { db, User } from "./data.js";
+import { User } from "./data.js";
+import { sqlDb } from "../src/db/index.js";
+import * as schema from "../src/db/schema.js";
+import { eq, and } from "drizzle-orm";
 
 export interface AuthenticatedRequest extends Request {
   user?: User;
@@ -29,10 +32,10 @@ function createOpaqueToken(prefix: string): string {
 export function generateTokens(user: User) {
   const token = createOpaqueToken("mhm_sess_");
   const refreshToken = createOpaqueToken("mhm_ref_");
-  const now = Date.now();
 
+  const now = Date.now();
   const session: SessionRecord = {
-    userId: user._id,
+    userId: user._id || user.id,
     email: user.email,
     role: user.role,
     createdAt: now,
@@ -48,7 +51,7 @@ export function generateTokens(user: User) {
   return { token, refreshToken };
 }
 
-export function rotateRefreshToken(refreshToken: string | undefined) {
+export async function rotateRefreshToken(refreshToken: string | undefined) {
   if (!refreshToken) return null;
 
   const existing = activeRefreshSessions.get(refreshToken);
@@ -57,15 +60,36 @@ export function rotateRefreshToken(refreshToken: string | undefined) {
     return null;
   }
 
-  const user = db.users.find((u) => u._id === existing.userId && u.status === "ACTIVE");
-  if (!user) {
+  // Fetch from PostgreSQL
+  const dbUser = await sqlDb.query.users.findFirst({
+    where: and(
+      eq(schema.users.id, existing.userId),
+      eq(schema.users.status, "ACTIVE")
+    ),
+  });
+
+  if (!dbUser) {
     activeRefreshSessions.delete(refreshToken);
     return null;
   }
 
+  const mappedUser: User = {
+    _id: dbUser.id,
+    id: dbUser.id,
+    name: dbUser.name,
+    email: dbUser.email,
+    password_hash: dbUser.passwordHash || "",
+    role: dbUser.role as any,
+    phone: dbUser.phone || "",
+    status: dbUser.status as any,
+    office_id: dbUser.officeId || undefined,
+    area_id: dbUser.areaId || undefined,
+    created_at: dbUser.createdAt ? dbUser.createdAt.toISOString() : new Date().toISOString(),
+  };
+
   // One-time refresh token rotation prevents replay of an already-used token.
   activeRefreshSessions.delete(refreshToken);
-  return generateTokens(user);
+  return generateTokens(mappedUser);
 }
 
 export function setAuthCookies(res: Response, token: string, refreshToken: string) {
@@ -100,10 +124,9 @@ export function clearAuthCookies(res: Response) {
   });
 }
 
-export function authMiddleware(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+export async function authMiddleware(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   let token = req.cookies?.access_token;
-
   if (!token && authHeader?.startsWith("Bearer ")) {
     token = authHeader.slice(7).trim();
   }
@@ -125,15 +148,37 @@ export function authMiddleware(req: AuthenticatedRequest, res: Response, next: N
     return res.status(401).json({ detail: "Sesi telah kedaluwarsa. Silakan login kembali." });
   }
 
-  const user = db.users.find((u) => u._id === session.userId && u.status === "ACTIVE");
-  if (!user) {
+  // Fetch user from postgres
+  const dbUser = await sqlDb.query.users.findFirst({
+    where: and(
+      eq(schema.users.id, session.userId),
+      eq(schema.users.status, "ACTIVE")
+    ),
+  });
+
+  if (!dbUser) {
     activeSessions.delete(token);
     return res.status(401).json({ detail: "Pengguna tidak aktif atau tidak ditemukan." });
   }
 
-  session.email = user.email;
-  session.role = user.role;
-  req.user = user;
+  session.email = dbUser.email;
+  session.role = dbUser.role;
+
+  const mappedUser: User = {
+    _id: dbUser.id,
+    id: dbUser.id,
+    name: dbUser.name,
+    email: dbUser.email,
+    password_hash: dbUser.passwordHash || "",
+    role: dbUser.role as any,
+    phone: dbUser.phone || "",
+    status: dbUser.status as any,
+    office_id: dbUser.officeId || undefined,
+    area_id: dbUser.areaId || undefined,
+    created_at: dbUser.createdAt ? dbUser.createdAt.toISOString() : new Date().toISOString(),
+  };
+
+  req.user = mappedUser;
   return next();
 }
 

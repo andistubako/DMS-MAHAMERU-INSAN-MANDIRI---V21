@@ -551,7 +551,200 @@ export async function loadAllFromPostgres(targetDb: any): Promise<boolean> {
         }
       }
 
+
+      // OVERWRITE users FROM POSTGRES RELATIONAL TABLES (Phase 1.5)
+      console.log("[Cloud SQL] Overwriting 'users' array from relational 'users' table...");
+      const usersRes = await client.query("SELECT * FROM users");
+      targetDb.users = usersRes.rows.map(u => ({
+        _id: u.id,
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        password_hash: u.password_hash,
+        role: u.role,
+        phone: u.phone,
+        status: u.status,
+        office_id: u.office_id,
+        area_id: u.area_id,
+        created_at: u.created_at ? new Date(u.created_at).toISOString() : new Date().toISOString()
+      }));
+      console.log(`[Cloud SQL] Overwritten ${targetDb.users.length} users from relational table.`);
+
+      console.log("[Cloud SQL] Overwriting 'salesmen' array from relational tables...");
+      const salesmenRes = await client.query(`
+        SELECT s.id as s_id, s.user_id, s.office_id as s_office, s.area_id as s_area, s.status as s_status, s.metadata, 
+               u.name, u.email, u.phone 
+        FROM salesmen s 
+        JOIN users u ON s.user_id = u.id
+      `);
+      targetDb.salesmen = salesmenRes.rows.map(r => ({
+        _id: r.s_id,
+        user_id: r.user_id,
+        code: r.metadata?.code || `SLS-${r.s_id.substring(0,4)}`,
+        name: r.name,
+        email: r.email,
+        phone: r.phone,
+        office_id: r.s_office,
+        area_id: r.s_area,
+        status: r.s_status,
+        target_daily_calls: r.metadata?.target_daily_calls || 15,
+        target_monthly_sales: r.metadata?.target_monthly_sales || 50000000,
+        created_at: new Date().toISOString()
+      }));
+      console.log(`[Cloud SQL] Overwritten ${targetDb.salesmen.length} salesmen from relational table.`);
+
+
+      // OVERWRITE offices, areas, channels FROM POSTGRES RELATIONAL TABLES (Phase 1.5)
+      console.log("[Cloud SQL] Overwriting 'offices', 'areas', 'channels' from relational tables...");
+      const officesRes = await client.query("SELECT * FROM offices");
+      targetDb.offices = officesRes.rows.map(o => ({
+        _id: o.id,
+        office_name: o.office_name,
+        office_code: o.office_code,
+        address: o.address,
+        phone: o.phone,
+        latitude: o.latitude,
+        longitude: o.longitude,
+        radius_m: o.radius_meters,
+        status: o.status,
+        created_at: o.created_at ? new Date(o.created_at).toISOString() : new Date().toISOString()
+      }));
+
+      const areasRes = await client.query("SELECT * FROM areas");
+      targetDb.areas = areasRes.rows.map(a => ({
+        _id: a.id,
+        name: a.area_name,
+        area_code: a.area_code,
+        office_id: a.office_id,
+        regency_id: a.regency_id,
+        status: a.status,
+        created_at: a.created_at ? new Date(a.created_at).toISOString() : new Date().toISOString(),
+        metadata: a.metadata
+      }));
+
+      const channelsRes = await client.query("SELECT * FROM channels");
+      targetDb.channels = channelsRes.rows.map(c => ({
+        _id: c.id,
+        name: c.channel_name,
+        channel_code: c.channel_code,
+        status: c.status,
+        metadata: c.metadata
+      }));
+      console.log(`[Cloud SQL] Overwritten ${targetDb.offices.length} offices, ${targetDb.areas.length} areas, ${targetDb.channels.length} channels.`);
+
+
+
+      // OVERWRITE products, skus FROM POSTGRES RELATIONAL TABLES (Phase 1.6)
+      console.log("[Cloud SQL] Overwriting 'products', 'skus' from relational tables...");
+      
+      const productsRes = await client.query("SELECT * FROM products");
+      targetDb.products = productsRes.rows.map((p: any) => ({
+        _id: p.id,
+        id: p.id,
+        name: p.product_name,
+        product_code: p.product_code,
+        category: p.category,
+        brand: p.brand,
+        status: p.status,
+        metadata: p.metadata,
+        created_at: p.created_at ? new Date(p.created_at).toISOString() : new Date().toISOString()
+      }));
+
+      const skusRes = await client.query("SELECT * FROM skus");
+      targetDb.skus = skusRes.rows.map((s: any) => ({
+        _id: s.id,
+        id: s.id,
+        product_id: s.product_id,
+        name: s.sku_name,
+        sku_code: s.sku_code,
+        barcode: s.barcode,
+        uom: s.uom, unit: s.uom,
+        pack_size: s.pack_size,
+        base_price: s.base_price,
+        status: s.status,
+        image_url: s.image_url,
+        metadata: s.metadata,
+        created_at: s.created_at ? new Date(s.created_at).toISOString() : new Date().toISOString()
+      }));
+      
+      
+      console.log(`[Cloud SQL] Overwritten ${targetDb.products.length} products, ${targetDb.skus.length} skus.`);
+
+      // OVERWRITE outlets FROM POSTGRES RELATIONAL TABLES (Phase 1.7)
+      console.log("[Cloud SQL] Overwriting 'outlets' from relational tables...");
+      const outletsRes = await client.query("SELECT * FROM outlets");
+      targetDb.outlets = outletsRes.rows.map((o: any) => {
+        const meta = o.metadata || {};
+        return {
+          _id: o.id,
+          id: o.id,
+          outlet_code: o.outlet_code,
+          outlet_name: o.outlet_name,
+          owner_name: o.owner_name || meta.owner_name,
+          phone: o.phone || meta.phone,
+          address: o.address || meta.address,
+          address_line: meta.address_line,
+          address_detail: meta.address_detail,
+          province_id: meta.province_id,
+          province_name: meta.province_name,
+          regency_id: meta.regency_id,
+          regency_name: meta.regency_name,
+          district_id: meta.district_id,
+          district_name: meta.district_name,
+          village_id: meta.village_id,
+          village_name: meta.village_name,
+          postal_code: meta.postal_code,
+          latitude: o.latitude,
+          longitude: o.longitude,
+          area_id: o.area_id,
+          channel_id: o.channel_id,
+          route_id: o.route_id,
+          status: o.status,
+          lifecycle_status: meta.lifecycle_status || "PROSPECT",
+          completed_transaction_count: meta.completed_transaction_count || 0,
+          total_volume: meta.total_volume || 0,
+          total_revenue: meta.total_revenue || 0,
+          credit_limit: meta.credit_limit || 0,
+          payment_term_days: meta.payment_term_days || 0,
+          photo_url: o.image_url,
+          notes: o.notes,
+          created_by: meta.created_by,
+          created_at: o.created_at ? new Date(o.created_at).toISOString() : new Date().toISOString()
+        };
+      });
+      console.log(`[Cloud SQL] Overwritten ${targetDb.outlets.length} outlets.`);
+
+
+      // OVERWRITE settings, companyProfile FROM POSTGRES RELATIONAL TABLES (Phase 1.5)
+      console.log("[Cloud SQL] Overwriting 'settings', 'companyProfile' from relational tables...");
+      const setRes = await client.query("SELECT * FROM system_settings WHERE id = 'global'");
+      if (setRes.rows.length > 0) {
+        targetDb.settings = setRes.rows[0].settings_data;
+      }
+
+      const compRes = await client.query("SELECT * FROM company_profile WHERE id = 'main'");
+      if (compRes.rows.length > 0) {
+        const c = compRes.rows[0];
+        targetDb.company_profile = {
+          companyName: c.company_name,
+          companyLegalName: c.company_legal_name,
+          companyCode: c.company_code,
+          address: c.address,
+          phone: c.phone,
+          email: c.email,
+          website: c.website,
+          description: c.description,
+          logoUrl: c.logo_url,
+          metadata: c.metadata,
+          updatedAt: c.updated_at
+        };
+      }
+      console.log(`[Cloud SQL] System settings & company profile overwritten.`);
+
       ensureDefaultUsers();
+
+
+
       ensureDefaultMasterData();
       const auditResult = auditAndRepairDatabase();
 

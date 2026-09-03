@@ -2,7 +2,7 @@ import bcrypt from "bcryptjs";
 import fs from "fs";
 import path from "path";
 
-export interface User {
+export interface User { id?: string;
   _id: string;
   name: string;
   email: string;
