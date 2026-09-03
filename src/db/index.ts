@@ -1,48 +1,43 @@
-import { drizzle } from "drizzle-orm/node-postgres";
-import { Pool } from "pg";
-import * as schema from "./schema.js";
+import { Pool, PoolConfig } from 'pg';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import * as schema from './schema.js';
+import * as dotenv from 'dotenv';
 
-// Add global connection pool caching to persist across hot-reloads
-declare global {
-  var _postgresPool: Pool | undefined;
-}
+dotenv.config();
 
-// Function to create or retrieve the connection pool.
-export const createPool = () => {
-  if (!global._postgresPool) {
-    const poolConfig = process.env.SQL_HOST
-      ? {
-          host: process.env.SQL_HOST,
-          user: process.env.SQL_USER,
-          password: process.env.SQL_PASSWORD,
-          database: process.env.SQL_DB_NAME,
-        }
-      : { connectionString: process.env.DATABASE_URL };
-
-    global._postgresPool = new Pool({
-      ...poolConfig,
-      max: 10,
-      connectionTimeoutMillis: 15000,
-      idleTimeoutMillis: 30000,
-      keepAlive: true,
-      keepAliveInitialDelayMillis: 10000,
-    });
-
-    // Prevent unhandled pool-level errors from crashing the application
-    global._postgresPool.on("error", (err) => {
-      // Benign idle disconnection or socket reset
-      if (err.message && (err.message.includes("ECONNRESET") || err.message.includes("closed"))) {
-        console.warn("[Cloud SQL] Idle client disconnected gracefully, will reconnect automatically.");
-      } else {
-        console.error("Unexpected error on idle SQL pool client:", err);
-      }
-    });
-  }
-  return global._postgresPool;
+const poolConfig: PoolConfig = {
+  // Connection Pooling Settings
+  max: parseInt(process.env.DB_MAX_CONNECTIONS || '20', 10), // Maksimal koneksi ke Postgres
+  idleTimeoutMillis: 30000, // Bebaskan koneksi setelah idle 30 detik
+  connectionTimeoutMillis: 5000, // Timeout dalam 5 detik jika DB tidak merespons
 };
 
-// Create or retrieve the pool instance.
-export const pool = createPool();
+// Deteksi Mode Deployment
+if (process.env.INSTANCE_CONNECTION_NAME) {
+  // PRODUCTION: Cloud Run via Unix Domain Socket
+  // Format: PROJECT:REGION:INSTANCE
+  poolConfig.host = `/cloudsql/${process.env.INSTANCE_CONNECTION_NAME}`;
+  poolConfig.user = process.env.DB_USER;
+  poolConfig.password = process.env.DB_PASS;
+  poolConfig.database = process.env.DB_NAME;
+  console.log(`[DB] Terhubung ke Cloud SQL instance: ${process.env.INSTANCE_CONNECTION_NAME}`);
+} else if (process.env.DATABASE_URL) {
+  // DEVELOPMENT: Local / Cloud SQL Auth Proxy via TCP
+  poolConfig.connectionString = process.env.DATABASE_URL;
+  console.log(`[DB] Terhubung ke Database via DATABASE_URL TCP.`);
+} else {
+  // FALLBACK LOKAL STANDAR
+  console.warn("[DB] WARNING: DATABASE_URL & INSTANCE_CONNECTION_NAME kosong. Mencoba fallback ke PostgreSQL lokal...");
+  poolConfig.connectionString = "postgres://postgres:postgres@localhost:5432/mahameru_db";
+}
 
-// Initialize Drizzle with the pool and schema.
+export const pool = new Pool(poolConfig);
+
+// Error handler agar Node.js process tidak crash diam-diam ketika idle connection terputus
+pool.on('error', (err, client) => {
+  console.error('[DB] Unexpected error on idle client:', err.message);
+  process.exit(-1); // Restart instance untuk memulihkan pool
+});
+
 export const sqlDb = drizzle(pool, { schema });
+export type DbClient = typeof sqlDb;

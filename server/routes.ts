@@ -4439,7 +4439,7 @@ apiRouter.get("/outlets", authMiddleware, async (req: AuthenticatedRequest, res)
   }
 });
 
-apiRouter.get("/outlets/nearby", authMiddleware, (req: AuthenticatedRequest, res) => {
+apiRouter.get("/outlets/nearby", authMiddleware, async (req: AuthenticatedRequest, res) => {
   const lat = parseFloat(req.query.lat as string);
   const lng = parseFloat(req.query.lng as string);
   const radius = parseFloat((req.query.radius_m as string) || "5000");
@@ -4448,26 +4448,49 @@ apiRouter.get("/outlets/nearby", authMiddleware, (req: AuthenticatedRequest, res
     return res.status(400).json({ detail: "Koordinat lat dan lng wajib diisi." });
   }
 
-  // If user is SALES, restrict nearby search strictly to their actively assigned outlets
   const assignedIds = req.user!.role === "SALES" ? new Set(getActiveAssignedOutletIds(req.user!._id)) : null;
+  
+  const conditions = [eq(pgOutlets.status, "ACTIVE")];
+  if (assignedIds) {
+    if (assignedIds.size === 0) conditions.push(sql`FALSE`);
+    else conditions.push(inArray(pgOutlets.id, Array.from(assignedIds)));
+  }
 
-  const nearby = db.outlets
-    .filter((o) => o.status === "ACTIVE" && (!assignedIds || assignedIds.has(o._id)))
-    .map((o) => {
-      const distance = haversineMeters(lat, lng, o.latitude, o.longitude);
-      const lifeCfg = LIFECYCLE_CONFIG[o.lifecycle_status || "PROSPECT"] || LIFECYCLE_CONFIG.PROSPECT;
-      return {
-        ...o,
-        distance_m: distance,
-        channel_name: db.channels.find((c) => c._id === o.channel_id)?.name || "-",
-        area_name: db.areas.find((a) => a._id === o.area_id)?.name || "-",
-        lifecycle_label: lifeCfg.label,
-        lifecycle_badge: lifeCfg.badge,
-        lifecycle_color: lifeCfg.color,
-      };
-    })
-    .filter((o) => o.distance_m <= radius)
-    .sort((a, b) => a.distance_m - b.distance_m);
+  const pgOuts = await sqlDb.query.outlets.findMany({ where: and(...conditions) });
+
+  const nearby = pgOuts.map((pgO: any) => {
+    const meta = pgO.metadata || {};
+    const o = {
+      _id: pgO.id,
+      outlet_code: pgO.outletCode,
+      outlet_name: pgO.outletName,
+      owner_name: pgO.ownerName,
+      phone: pgO.phone,
+      address: pgO.address,
+      latitude: pgO.latitude,
+      longitude: pgO.longitude,
+      area_id: pgO.areaId,
+      channel_id: pgO.channelId,
+      route_id: pgO.routeId,
+      status: pgO.status,
+      image_url: pgO.imageUrl,
+      notes: pgO.notes,
+      created_at: pgO.createdAt?.toISOString(),
+      ...meta
+    };
+    const distance = haversineMeters(lat, lng, o.latitude || 0, o.longitude || 0);
+    const lifeCfg = LIFECYCLE_CONFIG[o.lifecycle_status || "PROSPECT"] || LIFECYCLE_CONFIG.PROSPECT;
+    return {
+      ...o,
+      distance_m: distance,
+      channel_name: db.channels.find((c) => c._id === o.channel_id)?.name || "-",
+      area_name: db.areas.find((a) => a._id === o.area_id)?.name || "-",
+      lifecycle_label: lifeCfg.label,
+      lifecycle_badge: lifeCfg.badge,
+      lifecycle_color: lifeCfg.color,
+    };
+  }).filter(o => (o.distance_m || 0) <= radius)
+  .sort((a, b) => (a.distance_m || 0) - (b.distance_m || 0));
 
   res.json({ items: nearby, total: nearby.length });
 });
@@ -4511,18 +4534,20 @@ apiRouter.get("/outlets/pending", authMiddleware, requireRoles("ADMIN", "SUPERVI
   res.json({ items: pending, total: pending.length });
 });
 
-apiRouter.post("/outlets/check-duplicate", authMiddleware, (req, res) => {
+apiRouter.post("/outlets/check-duplicate", authMiddleware, async (req, res) => {
   const { outlet_name, phone, latitude, longitude, radius_m = 100 } = req.body || {};
   const duplicates: any[] = [];
+  
+  const pgOuts = await sqlDb.query.outlets.findMany();
 
-  for (const o of db.outlets) {
+  for (const o of pgOuts) {
     let reason = "";
-    if (phone && o.phone && o.phone.trim() === phone.trim()) {
+    if (phone && typeof phone === "string" && o.phone && typeof o.phone === "string" && o.phone.trim() === phone.trim()) {
       reason = "Nomor telepon sama";
-    } else if (outlet_name && o.outlet_name.toLowerCase().trim() === outlet_name.toLowerCase().trim()) {
+    } else if (outlet_name && typeof outlet_name === "string" && o.outletName && typeof o.outletName === "string" && o.outletName.toLowerCase().trim() === outlet_name.toLowerCase().trim()) {
       reason = "Nama outlet persis sama";
-    } else if (latitude != null && longitude != null) {
-      const dist = haversineMeters(latitude, longitude, o.latitude, o.longitude);
+    } else if (latitude != null && longitude != null && o.latitude != null && o.longitude != null) {
+      const dist = haversineMeters(latitude, longitude, Number(o.latitude), Number(o.longitude));
       if (dist <= radius_m) {
         reason = `Berjarak ${dist}m dari titik lokasi`;
       }
@@ -4530,11 +4555,12 @@ apiRouter.post("/outlets/check-duplicate", authMiddleware, (req, res) => {
 
     if (reason) {
       duplicates.push({
-        outlet_id: o._id,
-        outlet_code: o.outlet_code,
-        outlet_name: o.outlet_name,
-        address: o.address,
+        outlet_id: o.id,
+        outlet_code: o.outletCode,
+        outlet_name: o.outletName,
         phone: o.phone,
+        address: o.address,
+        distance_m: latitude && longitude && o.latitude && o.longitude ? haversineMeters(latitude, longitude, Number(o.latitude), Number(o.longitude)) : null,
         reason,
       });
     }
@@ -5042,15 +5068,23 @@ apiRouter.delete("/outlets/:id", authMiddleware, requireRoles("ADMIN", "OWNER"),
 });
 
 apiRouter.post("/outlets/:id/toggle", authMiddleware, requireRoles("ADMIN", "SUPERVISOR", "OWNER"), async (req, res) => {
-  const outlet = db.outlets.find((o) => o._id === req.params.id);
-  if (!outlet) return res.status(404).json({ detail: "Outlet tidak ditemukan." });
+  const pgRec = await sqlDb.query.outlets.findFirst({ where: eq(pgOutlets.id, req.params.id) });
+  if (!pgRec) return res.status(404).json({ detail: "Outlet tidak ditemukan." });
   
-  const newStatus = outlet.status === "ACTIVE" ? "INACTIVE" : "ACTIVE";
+  const newStatus = pgRec.status === "ACTIVE" ? "INACTIVE" : "ACTIVE";
   
   try {
-    await sqlDb.update(pgOutlets).set({ status: newStatus }).where(eq(pgOutlets.id, outlet._id));
-    outlet.status = newStatus;
-    syncSingleDoc("outlets", outlet._id, outlet).catch(() => {});
+    await sqlDb.update(pgOutlets).set({ status: newStatus }).where(eq(pgOutlets.id, pgRec.id));
+    
+    const outlet = {
+      _id: pgRec.id,
+      outlet_code: pgRec.outletCode,
+      outlet_name: pgRec.outletName,
+      status: newStatus,
+      ...(pgRec.metadata as Record<string, any> || {})
+    };
+    
+    syncSingleDoc("outlets", pgRec.id, outlet).catch(() => {});
     res.json(outlet);
   } catch(e) {
     res.status(500).json({ detail: "Gagal update status outlet" });

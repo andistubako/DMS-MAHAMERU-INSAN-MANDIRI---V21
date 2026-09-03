@@ -1,132 +1,100 @@
-import { isCloudSqlConnected } from "./cloudsqlSync.js";
-import { sqlDb } from "../src/db/index.js";
-import { sql } from "drizzle-orm";
-import { assertAdjustmentRole, assertPositiveQuantity, assertSufficientStock } from "./inventoryPolicy.js";
+import { eq, sql, and } from 'drizzle-orm';
+import { sqlDb } from '../src/db/index.js';
+import { transactions, inventory, stockMovements } from '../src/db/schema.js';
+import { transactionItems } from './transaction-items.schema.js';
+import { randomUUID } from 'crypto';
 
-/**
- * Atomic stock operations. Callers must invoke these inside the same logical
- * transaction as the business document they are posting.
- */
-export async function transferStock(args: {
+export interface SalesItemPayload {
   skuId: string;
+  warehouseId: string;
   quantity: number;
-  sourceLocationType: string;
-  sourceLocationId: string;
-  destLocationType: string;
-  destLocationId: string;
-  performedBy: string;
-  referenceId?: string;
-}) {
-  assertPositiveQuantity(args.quantity);
-
-  const runner = isCloudSqlConnected ? (cb: any) => sqlDb.transaction(cb) : (cb: any) => cb(null); return runner(async (tx: any) => {
-    const source = await tx.execute(sql`
-      SELECT id, stock_on_hand, available_stock
-      FROM inventory
-      WHERE location_type = ${args.sourceLocationType}
-        AND location_id = ${args.sourceLocationId}
-        AND sku_id = ${args.skuId}
-      FOR UPDATE
-    `);
-
-    const sourceRow: any = source.rows[0];
-    if (!sourceRow) throw new Error("SOURCE_STOCK_NOT_FOUND");
-    assertSufficientStock(Number(sourceRow.available_stock ?? sourceRow.stock_on_hand ?? 0), args.quantity);
-
-    const destination = await tx.execute(sql`
-      SELECT id
-      FROM inventory
-      WHERE location_type = ${args.destLocationType}
-        AND location_id = ${args.destLocationId}
-        AND sku_id = ${args.skuId}
-      FOR UPDATE
-    `);
-
-    if (!destination.rows[0]) {
-      await tx.execute(sql`
-        INSERT INTO inventory (id, location_type, location_id, sku_id, stock_on_hand, available_stock)
-        VALUES (${crypto.randomUUID()}, ${args.destLocationType}, ${args.destLocationId}, ${args.skuId}, 0, 0)
-      `);
-    }
-
-    await tx.execute(sql`
-      UPDATE inventory
-      SET stock_on_hand = stock_on_hand - ${args.quantity},
-          available_stock = available_stock - ${args.quantity},
-          updated_at = NOW()
-      WHERE location_type = ${args.sourceLocationType}
-        AND location_id = ${args.sourceLocationId}
-        AND sku_id = ${args.skuId}
-    `);
-
-    await tx.execute(sql`
-      UPDATE inventory
-      SET stock_on_hand = stock_on_hand + ${args.quantity},
-          available_stock = available_stock + ${args.quantity},
-          updated_at = NOW()
-      WHERE location_type = ${args.destLocationType}
-        AND location_id = ${args.destLocationId}
-        AND sku_id = ${args.skuId}
-    `);
-
-    await tx.execute(sql`
-      INSERT INTO stock_movements
-        (id, movement_type, source_location_type, source_location_id,
-         dest_location_type, dest_location_id, sku_id, quantity, reference_id, performed_by)
-      VALUES
-        (${crypto.randomUUID()}, 'TRANSFER', ${args.sourceLocationType}, ${args.sourceLocationId},
-         ${args.destLocationType}, ${args.destLocationId}, ${args.skuId}, ${args.quantity},
-         ${args.referenceId ?? null}, ${args.performedBy})
-    `);
-
-    return { ok: true, skuId: args.skuId, quantity: args.quantity };
-  });
+  price: number;
 }
 
-export async function adjustStock(args: {
-  role: string;
-  skuId: string;
-  locationType: string;
-  locationId: string;
-  quantityDelta: number;
-  performedBy: string;
-  reason: string;
-}) {
-  assertAdjustmentRole(args.role);
-  if (!Number.isInteger(args.quantityDelta) || args.quantityDelta === 0) {
-    throw new Error("INVALID_STOCK_ADJUSTMENT");
-  }
+export async function processAtomicSales(
+  outletId: string,
+  salesmanId: string,
+  items: SalesItemPayload[]
+) {
+  return await sqlDb.transaction(async (tx) => {
+    const txnId = randomUUID();
+    let totalAmount = 0;
+    const now = new Date();
 
-  const runner = isCloudSqlConnected ? (cb: any) => sqlDb.transaction(cb) : (cb: any) => cb(null); return runner(async (tx: any) => {
-    const current = await tx.execute(sql`
-      SELECT id, stock_on_hand, available_stock
-      FROM inventory
-      WHERE location_type = ${args.locationType}
-        AND location_id = ${args.locationId}
-        AND sku_id = ${args.skuId}
-      FOR UPDATE
-    `);
-    const row: any = current.rows[0];
-    if (!row) throw new Error("STOCK_NOT_FOUND");
-    if (Number(row.stock_on_hand) + args.quantityDelta < 0) throw new Error("INSUFFICIENT_STOCK");
+    // 1. Catat Header Transaksi
+    await tx.insert(transactions).values({
+      id: txnId,
+      invoiceNumber: `INV-${Date.now()}`,
+      outletId,
+      salesmanId,
+      status: 'COMPLETED',
+      subtotal: 0,
+      totalAmount: 0,
+      transactionDate: now.toISOString(),
+      items: items, // required field
+      createdAt: now,
+    } as any);
 
-    await tx.execute(sql`
-      UPDATE inventory
-      SET stock_on_hand = stock_on_hand + ${args.quantityDelta},
-          available_stock = available_stock + ${args.quantityDelta},
-          updated_at = NOW()
-      WHERE id = ${row.id}
-    `);
+    for (const item of items) {
+      const currentStockResult = await tx
+        .select()
+        .from(inventory)
+        .where(and(
+          eq(inventory.skuId, item.skuId), 
+          eq(inventory.locationId, item.warehouseId)
+        ))
+        .for('update'); 
 
-    await tx.execute(sql`
-      INSERT INTO stock_movements
-        (id, movement_type, source_location_type, source_location_id,
-         dest_location_type, dest_location_id, sku_id, quantity, performed_by, notes)
-      VALUES
-        (${crypto.randomUUID()}, 'ADJUSTMENT', ${args.locationType}, ${args.locationId},
-         NULL, NULL, ${args.skuId}, ${Math.abs(args.quantityDelta)}, ${args.performedBy}, ${args.reason})
-    `);
+      const currentStock = currentStockResult[0];
 
-    return { ok: true, skuId: args.skuId, quantityDelta: args.quantityDelta };
+      if (!currentStock || (currentStock.stockOnHand || 0) < item.quantity) {
+        throw new Error(`STOK TIDAK CUKUP: SKU ${item.skuId} di Gudang ${item.warehouseId}. Sisa: ${currentStock?.stockOnHand || 0}`);
+      }
+
+      await tx.update(inventory)
+        .set({ 
+          stockOnHand: sql`${inventory.stockOnHand} - ${item.quantity}`,
+          availableStock: sql`${inventory.availableStock} - ${item.quantity}`,
+          updatedAt: now
+        })
+        .where(eq(inventory.id, currentStock.id));
+
+      await tx.insert(stockMovements).values({
+        id: randomUUID(),
+        skuId: item.skuId,
+        sourceLocationId: item.warehouseId,
+        sourceLocationType: 'WAREHOUSE',
+        movementType: 'OUT',
+        quantity: item.quantity,
+        referenceId: txnId,
+        createdAt: now
+      });
+
+      const subtotal = item.quantity * item.price;
+      totalAmount += subtotal;
+
+      await tx.insert(transactionItems).values({
+        id: randomUUID(),
+        transactionId: txnId,
+        skuId: item.skuId,
+        quantity: item.quantity,
+        volume: item.quantity,
+        unitPrice: item.price,
+        subtotal
+      });
+    }
+
+    await tx.update(transactions)
+      .set({ 
+        subtotal: totalAmount,
+        totalAmount: totalAmount 
+      })
+      .where(eq(transactions.id, txnId));
+
+    return { 
+      success: true, 
+      message: 'Transaksi berhasil. Stok terpotong.', 
+      transactionId: txnId 
+    };
   });
 }
